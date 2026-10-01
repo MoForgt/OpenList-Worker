@@ -106,11 +106,11 @@ export class GoogleDrive implements StorageDriver {
   }
 
   async move(
-    _srcDir: string,
-    _dstDir: string,
+    srcDir: string,
+    dstDir: string,
     _names: string[],
     srcPhysical: string,
-    dstPhysical: string,
+    _dstPhysical: string,
   ): Promise<void> {
     const fileId = await this.client.resolveFileId(srcPhysical)
     const srcParts = srcPhysical.split("/").filter(Boolean)
@@ -118,24 +118,20 @@ export class GoogleDrive implements StorageDriver {
     const srcParentId = await this.client.resolveFileId(
       "/" + srcParts.join("/"),
     )
-    // dstPhysical 是目标项自身的物理路径，父目录去掉末段即得；
-    // dstDir 是虚拟路径（含挂载前缀），而 resolveFileId 期望物理路径，直接用会错位。
-    const { parentId: dstParentId } =
-      await this.client.resolveParentAndName(dstPhysical)
+    const dstParentId = await this.client.resolveFileId(dstDir)
     await this.client.move(fileId, srcParentId, dstParentId)
   }
 
   async copy(
     _srcDir: string,
-    _dstDir: string,
+    dstDir: string,
     _names: string[],
     srcPhysical: string,
-    dstPhysical: string,
+    _dstPhysical: string,
   ): Promise<void> {
     const fileId = await this.client.resolveFileId(srcPhysical)
-    // 目标父目录与目标名字均以 dstPhysical（目标项自身路径）为准。
-    const { parentId: dstParentId, name } =
-      await this.client.resolveParentAndName(dstPhysical)
+    const name = srcPhysical.split("/").filter(Boolean).pop() || "copy"
+    const dstParentId = await this.client.resolveFileId(dstDir)
     await this.client.copy(fileId, dstParentId, name)
   }
 

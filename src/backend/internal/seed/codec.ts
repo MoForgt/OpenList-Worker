@@ -458,7 +458,6 @@ export function decodeCas(data: Uint8Array): ParsedSeed {
           create_time: String(value.create_time || ""),
           slice_md5s: value.slice_md5s,
           slice_size: value.slice_size,
-          cloud: value.cloud,
         }),
       ],
     }),

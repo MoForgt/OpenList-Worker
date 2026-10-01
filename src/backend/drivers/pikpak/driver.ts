@@ -257,28 +257,33 @@ export class PikPakDriver implements StorageDriver {
     physicalPath: string,
     names: string[],
   ): Promise<void> {
-    // physicalPath 是目标项自身的物理路径（参数即目标项路径，不得再拼 name，
-    // 否则指向 <item>/<name>）；父目录取 physicalPath 去掉末段后的部分，
-    // 目标名取其末段，在父目录子项中按名查找对应 id。
-    const clean = this.cleanPath(physicalPath)
-    const targetName = clean.split("/").pop() || ""
-    const parentPath = clean.split("/").slice(0, -1).join("/")
-    const parentId = await this.resolveParentId(parentPath)
+    const parentId = await this.resolveParentId(physicalPath)
     const files = await this.getFiles(parentId)
-    const match = files.find((f) => f.name === targetName)
-    if (!match) return
+    const ids: string[] = []
+
+    for (const name of names) {
+      const match = files.find((f) => f.name === name)
+      if (match) {
+        ids.push(match.id)
+      }
+    }
+
+    if (ids.length === 0) return
 
     await this.client.request(
       "https://api-drive.mypikpak.net/drive/v1/files:batchTrash",
       {
         method: "POST",
         body: {
-          ids: [match.id],
+          ids,
         },
       },
     )
 
-    this.idCache.delete(clean)
+    const clean = this.cleanPath(physicalPath)
+    for (const name of names) {
+      this.idCache.delete(clean ? `${clean}/${name}` : `/${name}`)
+    }
   }
 
   async move(
@@ -288,28 +293,26 @@ export class PikPakDriver implements StorageDriver {
     srcPhys: string,
     dstPhys: string,
   ): Promise<void> {
-    // srcPhys/dstPhys 是源/目标项自身的物理路径（参数即目标项路径，不得再拼 name）：
-    // 直接当父目录解析会指到项本身——源侧会去 <srcItem> 的子项里找 name（永远落空），
-    // 目标侧解析一个尚不存在的目标项必然报错。
-    // 故两侧父目录均去掉末段，源名取 srcPhys 末段，在源父目录子项中按名查 id。
-    const srcClean = this.cleanPath(srcPhys)
-    const dstClean = this.cleanPath(dstPhys)
-    const srcName = srcClean.split("/").pop() || ""
-    const srcParentPath = srcClean.split("/").slice(0, -1).join("/")
-    const dstParentPath = dstClean.split("/").slice(0, -1).join("/")
-
-    const srcParentId = await this.resolveParentId(srcParentPath)
-    const dstParentId = await this.resolveParentId(dstParentPath)
+    const srcParentId = await this.resolveParentId(srcPhys)
+    const dstParentId = await this.resolveParentId(dstPhys)
     const srcFiles = await this.getFiles(srcParentId)
-    const match = srcFiles.find((f) => f.name === srcName)
-    if (!match) return
+    const ids: string[] = []
+
+    for (const name of names) {
+      const match = srcFiles.find((f) => f.name === name)
+      if (match) {
+        ids.push(match.id)
+      }
+    }
+
+    if (ids.length === 0) return
 
     await this.client.request(
       "https://api-drive.mypikpak.net/drive/v1/files:batchMove",
       {
         method: "POST",
         body: {
-          ids: [match.id],
+          ids,
           to: {
             parent_id: dstParentId,
           },
@@ -317,7 +320,10 @@ export class PikPakDriver implements StorageDriver {
       },
     )
 
-    this.idCache.delete(srcClean)
+    const srcClean = this.cleanPath(srcPhys)
+    for (const name of names) {
+      this.idCache.delete(srcClean ? `${srcClean}/${name}` : `/${name}`)
+    }
   }
 
   async copy(
@@ -327,26 +333,26 @@ export class PikPakDriver implements StorageDriver {
     srcPhys: string,
     dstPhys: string,
   ): Promise<void> {
-    // 与 move 同理：参数是源/目标项自身路径，不得再拼 name；
-    // 两侧父目录均去掉末段，源名取 srcPhys 末段，在源父目录子项中按名查 id。
-    const srcClean = this.cleanPath(srcPhys)
-    const dstClean = this.cleanPath(dstPhys)
-    const srcName = srcClean.split("/").pop() || ""
-    const srcParentPath = srcClean.split("/").slice(0, -1).join("/")
-    const dstParentPath = dstClean.split("/").slice(0, -1).join("/")
-
-    const srcParentId = await this.resolveParentId(srcParentPath)
-    const dstParentId = await this.resolveParentId(dstParentPath)
+    const srcParentId = await this.resolveParentId(srcPhys)
+    const dstParentId = await this.resolveParentId(dstPhys)
     const srcFiles = await this.getFiles(srcParentId)
-    const match = srcFiles.find((f) => f.name === srcName)
-    if (!match) return
+    const ids: string[] = []
+
+    for (const name of names) {
+      const match = srcFiles.find((f) => f.name === name)
+      if (match) {
+        ids.push(match.id)
+      }
+    }
+
+    if (ids.length === 0) return
 
     await this.client.request(
       "https://api-drive.mypikpak.net/drive/v1/files:batchCopy",
       {
         method: "POST",
         body: {
-          ids: [match.id],
+          ids,
           to: {
             parent_id: dstParentId,
           },

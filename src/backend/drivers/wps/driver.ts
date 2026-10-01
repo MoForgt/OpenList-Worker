@@ -217,24 +217,25 @@ export class WpsDriver implements StorageDriver {
     srcPhys: string,
     dstPhys: string,
   ): Promise<void> {
-    // srcPhys/dstPhys 已是源/目标项自身的物理路径（op/storage.ts moveItems 逐项调用），
-    // 参数即项路径：源直接用 srcPath，目标文件夹取 dstPath 去掉末段的父目录；
-    // 不得再拼 name，否则会指向 <item>/<name>。
-    const srcPath = this.cleanPath(srcPhys)
-    const dstPath = this.cleanPath(dstPhys)
-    const dstParentPath = dstPath.substring(0, dstPath.lastIndexOf("/")) || "/"
-    const dstNode = await this.resolvePath(dstParentPath)
+    const dstNode = await this.resolvePath(this.cleanPath(dstPhys))
     if (!dstNode || !dstNode.isDir || dstNode.kind === "root") {
       throw new Error("Target destination directory not found")
     }
-    const srcNode = await this.resolvePath(srcPath)
-    if (srcNode) {
-      await this.client.move(
-        srcNode.groupId,
-        srcNode.fileId,
-        dstNode.groupId,
-        dstNode.fileId,
-      )
+
+    for (const name of names) {
+      const srcItemPath =
+        this.cleanPath(srcPhys) === "/"
+          ? `/${name}`
+          : `${this.cleanPath(srcPhys)}/${name}`
+      const srcNode = await this.resolvePath(srcItemPath)
+      if (srcNode) {
+        await this.client.move(
+          srcNode.groupId,
+          srcNode.fileId,
+          dstNode.groupId,
+          dstNode.fileId,
+        )
+      }
     }
   }
 
@@ -258,24 +259,25 @@ export class WpsDriver implements StorageDriver {
     srcPhys: string,
     dstPhys: string,
   ): Promise<void> {
-    // srcPhys/dstPhys 已是源/目标项自身的物理路径（op/storage.ts copyItems 逐项调用），
-    // 参数即项路径：源直接用 srcPath，目标文件夹取 dstPath 去掉末段的父目录；
-    // 不得再拼 name，否则会指向 <item>/<name>。
-    const srcPath = this.cleanPath(srcPhys)
-    const dstPath = this.cleanPath(dstPhys)
-    const dstParentPath = dstPath.substring(0, dstPath.lastIndexOf("/")) || "/"
-    const dstNode = await this.resolvePath(dstParentPath)
+    const dstNode = await this.resolvePath(this.cleanPath(dstPhys))
     if (!dstNode || !dstNode.isDir || dstNode.kind === "root") {
       throw new Error("Target destination directory not found")
     }
-    const srcNode = await this.resolvePath(srcPath)
-    if (srcNode) {
-      await this.client.copy(
-        srcNode.groupId,
-        srcNode.fileId,
-        dstNode.groupId,
-        dstNode.fileId,
-      )
+
+    for (const name of names) {
+      const srcItemPath =
+        this.cleanPath(srcPhys) === "/"
+          ? `/${name}`
+          : `${this.cleanPath(srcPhys)}/${name}`
+      const srcNode = await this.resolvePath(srcItemPath)
+      if (srcNode) {
+        await this.client.copy(
+          srcNode.groupId,
+          srcNode.fileId,
+          dstNode.groupId,
+          dstNode.fileId,
+        )
+      }
     }
   }
 
@@ -284,12 +286,15 @@ export class WpsDriver implements StorageDriver {
     physicalPath: string,
     names: string[],
   ): Promise<void> {
-    // physicalPath 是目标项自身的物理路径（op/storage.ts removeItems 逐项调用），
-    // 参数即项路径，直接解析它即可；再拼 name 会指向 <item>/<name>，resolvePath 返回 null
-    // 后被静默跳过，接口成功但文件仍在。
-    const node = await this.resolvePath(this.cleanPath(physicalPath))
-    if (node && node.kind !== "root" && node.kind !== "group") {
-      await this.client.delete(node.groupId, node.fileId)
+    for (const name of names) {
+      const itemPath =
+        this.cleanPath(physicalPath) === "/"
+          ? `/${name}`
+          : `${this.cleanPath(physicalPath)}/${name}`
+      const node = await this.resolvePath(itemPath)
+      if (node && node.kind !== "root" && node.kind !== "group") {
+        await this.client.delete(node.groupId, node.fileId)
+      }
     }
   }
 

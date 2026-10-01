@@ -136,12 +136,14 @@ export class YandexDriver implements StorageDriver {
     physicalPath: string,
     names: string[],
   ): Promise<void> {
-    // physicalPath 是目标项自身的物理路径（op/storage.ts removeItems 逐项调用），
-    // 参数即项路径，直接删除它即可；再拼 name 会指向 <item>/<name>，DELETE 404 报错。
-    await this.client.request("", {
-      method: "DELETE",
-      params: { path: this.cleanPath(physicalPath) },
-    })
+    const clean = this.cleanPath(physicalPath)
+    for (const name of names) {
+      const targetPath = clean === "/" ? `/${name}` : `${clean}/${name}`
+      await this.client.request("", {
+        method: "DELETE",
+        params: { path: targetPath },
+      })
+    }
   }
 
   async move(
@@ -151,16 +153,21 @@ export class YandexDriver implements StorageDriver {
     srcPhys: string,
     dstPhys: string,
   ): Promise<void> {
-    // srcPhys/dstPhys 已是源/目标项自身的物理路径（op/storage.ts moveItems 逐项调用），
-    // 参数即项路径，直接作为 from/path 使用；再拼 name 会指向 <item>/<name>，源/目标错位。
-    await this.client.request("/move", {
-      method: "POST",
-      params: {
-        from: this.cleanPath(srcPhys),
-        path: this.cleanPath(dstPhys),
-        overwrite: "true",
-      },
-    })
+    const srcClean = this.cleanPath(srcPhys)
+    const dstClean = this.cleanPath(dstPhys)
+
+    for (const name of names) {
+      const fromPath = srcClean === "/" ? `/${name}` : `${srcClean}/${name}`
+      const toPath = dstClean === "/" ? `/${name}` : `${dstClean}/${name}`
+      await this.client.request("/move", {
+        method: "POST",
+        params: {
+          from: fromPath,
+          path: toPath,
+          overwrite: "true",
+        },
+      })
+    }
   }
 
   async copy(
@@ -170,16 +177,21 @@ export class YandexDriver implements StorageDriver {
     srcPhys: string,
     dstPhys: string,
   ): Promise<void> {
-    // srcPhys/dstPhys 已是源/目标项自身的物理路径（op/storage.ts copyItems 逐项调用），
-    // 参数即项路径，直接作为 from/path 使用；再拼 name 会指向 <item>/<name>，源/目标错位。
-    await this.client.request("/copy", {
-      method: "POST",
-      params: {
-        from: this.cleanPath(srcPhys),
-        path: this.cleanPath(dstPhys),
-        overwrite: "true",
-      },
-    })
+    const srcClean = this.cleanPath(srcPhys)
+    const dstClean = this.cleanPath(dstPhys)
+
+    for (const name of names) {
+      const fromPath = srcClean === "/" ? `/${name}` : `${srcClean}/${name}`
+      const toPath = dstClean === "/" ? `/${name}` : `${dstClean}/${name}`
+      await this.client.request("/copy", {
+        method: "POST",
+        params: {
+          from: fromPath,
+          path: toPath,
+          overwrite: "true",
+        },
+      })
+    }
   }
 
   async put(
