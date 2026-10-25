@@ -130,6 +130,26 @@ async function rateLimitMiddleware(c: any, next: () => Promise<void>) {
 //   （EdgeOne Schedules 定时调度）与非 /api 路径。
 // Hono 会缓存已读取的 body 文本（bodyCache.text），此处预读后
 // handler 里的 c.req.json() 复用缓存，不会二次消费请求流。
+//
+// 重试协议（issue #112 的"彻底解决"侧）：
+// 平台丢 body 是**间歇性**故障（实测 7%~40%），服务端无法凭空恢复请求体，
+// 单靠这里返回 400 只能把静默错误变成显式错误 —— 请求依然失败。因此本
+// 中间件的三个 400 统一带 `X-Request-Body-Lost: 1` 响应头：它们全部发生在
+// 任何业务 handler 之前（连请求体都没读到，业务必然没执行过），客户端
+// 重试绝对安全、不会重复执行任何写操作。前端 dist 在构建期由
+// fetch-frontend.mjs 注入重试层（包裹 XHR/fetch），见到该标记即自动
+// 透明重发（最多 3 次），平台偶发丢 body 时用户无感知，彻底解决
+// "偶发看到根目录内容 / 报错" 的用户侧症状。消息字符串保持精确不变
+// （无标记头的旧客户端仍可按 message 匹配）。同一修复的源头层（缩短
+// 平台丢 body 的暴露窗口）见 src/backend/server/request-body.ts。
+const BODY_LOST_HEADER = "X-Request-Body-Lost"
+
+function bodyLostResponse(c: Context, message: string) {
+  return c.json({ code: 400, message, data: null }, 400, {
+    [BODY_LOST_HEADER]: "1",
+  })
+}
+
 async function jsonBodyGuard(c: Context, next: () => Promise<void>) {
   const path = c.req.path
   const method = c.req.method.toUpperCase()
@@ -151,19 +171,18 @@ async function jsonBodyGuard(c: Context, next: () => Promise<void>) {
     try {
       text = await c.req.text()
     } catch {
-      return c.json(
-        { code: 400, message: "failed to read request body", data: null },
-        400,
+      // 平台把请求流弄断了。留一条日志供平台侧排查（EdgeOne Pages
+      // 面板无函数日志，任何接入了日志的平台都能看到）。
+      console.warn(
+        `[jsonBodyGuard] request body unreadable (platform dropped it?), rejecting: ${method} ${path}`,
       )
+      return bodyLostResponse(c, "failed to read request body")
     }
 
     if (text.trim() === "") {
       const strict = path.startsWith("/api/fs") || path.startsWith("/api/share")
       if (strict) {
-        return c.json(
-          { code: 400, message: "request body required", data: null },
-          400,
-        )
+        return bodyLostResponse(c, "request body required")
       }
       // 空 body 放行（保持向后兼容），但管理端空 body 属于可疑行为
       // （如 cache/clear 空 body 会清空全部缓存），显式记日志便于定位。
@@ -178,10 +197,7 @@ async function jsonBodyGuard(c: Context, next: () => Promise<void>) {
     try {
       JSON.parse(text)
     } catch {
-      return c.json(
-        { code: 400, message: "invalid JSON request body", data: null },
-        400,
-      )
+      return bodyLostResponse(c, "invalid JSON request body")
     }
   }
 
@@ -251,7 +267,7 @@ export function setupRouter(app: Hono) {
       },
       allowHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
       allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      exposeHeaders: ["Content-Length", "Content-Type"],
+      exposeHeaders: ["Content-Length", "Content-Type", "X-Request-Body-Lost"],
       maxAge: 600,
       credentials: true,
     }),

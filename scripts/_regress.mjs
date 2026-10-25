@@ -312,6 +312,255 @@ try {
     if (hadWSP) globalThis.WebSocketPair = prevWSP
     else delete globalThis.WebSocketPair
   }
+
+  console.log("=== L. issue #112：请求体丢失防线（源头物化 + guard 重试标记）===")
+  const rbMod = await import("../src/backend/server/request-body.ts")
+  const app112 = (await import("../src/backend/index")).default
+  const MARKER = "X-Request-Body-Lost"
+
+  // --- 源头层：入口请求体物化（materializeRequestBody） ---
+  const small = new Request("http://x/api/fs/list", {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-length": "2" },
+    body: "{}",
+  })
+  const m1 = await rbMod.materializeRequestBody(small)
+  check("小 body → 缓冲重建（不是原请求）", m1 !== small && (await m1.text()) === "{}")
+  check(
+    "重建保留 method/headers",
+    m1.method === "POST" &&
+      m1.headers.get("content-type") === "application/json" &&
+      m1.headers.get("content-length") === "2",
+  )
+  const bigBody = new Uint8Array(1024 * 1024 + 1)
+  const big = new Request("http://x/api/fs/put", {
+    method: "PUT",
+    headers: { "content-length": String(bigBody.byteLength) },
+    body: bigBody,
+  })
+  check("大 body → 原样透传（不缓冲，保护流式上传）", (await rbMod.materializeRequestBody(big)) === big)
+  const getReq = new Request("http://x/")
+  check("GET → 透传", (await rbMod.materializeRequestBody(getReq)) === getReq)
+  // undici 对 string body 自动补 content-length；真正「无 content-length」要用流 body
+  const chunked = new Request("http://x/p", {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: new ReadableStream({
+      start(c) { c.enqueue(new TextEncoder().encode("x")); c.close() },
+    }),
+    duplex: "half",
+  })
+  check("无 content-length → 透传", (await rbMod.materializeRequestBody(chunked)) === chunked)
+  const brokenBody = new Request("http://x/api/fs/list", {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-length": "2" },
+    body: new ReadableStream({ start(c) { c.error(new Error("lost by platform")) } }),
+    duplex: "half",
+  })
+  check("平台已断流 → 不吞错、原样交 guard", (await rbMod.materializeRequestBody(brokenBody)) === brokenBody)
+
+  // --- guard 端到端：三个 400 必须带 X-Request-Body-Lost 标记（前端重试依据） ---
+  const env112 = { DB_DRIVER: "kv", DB_FORMAT: "key", JWT_SECRET, __requestOrigin: origin }
+  async function post112(raw) {
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    }
+    if (raw !== undefined) init.body = raw
+    return app112.request("http://x/api/fs/list", init, env112)
+  }
+  let r112 = await post112(JSON.stringify({ path: "/手机软件" }))
+  check(
+    "正常 body → 不被 guard 拦截、无标记",
+    r112.status !== 400 && r112.headers.get(MARKER) !== "1",
+  )
+  r112 = await post112("")
+  check(
+    "空 body → 400 + 标记",
+    r112.status === 400 &&
+      r112.headers.get(MARKER) === "1" &&
+      (await r112.json()).message === "request body required",
+  )
+  r112 = await post112('{"path":"/手机软件"')
+  check(
+    "截断 JSON → 400 + 标记",
+    r112.status === 400 &&
+      r112.headers.get(MARKER) === "1" &&
+      (await r112.json()).message === "invalid JSON request body",
+  )
+  const brokenReq = new Request("http://x/api/fs/list", {
+    method: "POST",
+    headers: { "content-type": "application/json", "content-length": "2" },
+    body: new ReadableStream({ start(c) { c.error(new Error("lost")) } }),
+    duplex: "half",
+  })
+  r112 = await app112.request(brokenReq, undefined, env112)
+  check(
+    "平台断流 → 400 + 标记",
+    r112.status === 400 &&
+      r112.headers.get(MARKER) === "1" &&
+      (await r112.json()).message === "failed to read request body",
+  )
+
+  // --- 前端侧：注入脚本（XHR/fetch 透明重试层）行为验证 ---
+  // 用 FakeXHR 模拟 axios 的 onloadend 用法，验证：
+  // 标记 400 → 自动重试直至成功；普通 400 / 网络错误 → 原样透传（不重试）。
+  const rpMod = await import("../scripts/retry-patch.mjs")
+  const patchCode = rpMod.RETRY_PATCH_SCRIPT
+    .replace(/^<script>/, "")
+    .replace(/<\/script>\s*$/, "")
+  check("注入脚本不含 </script>（HTML 内联安全）", !patchCode.includes("</script"))
+
+  class FakeXHR {
+    constructor() {
+      this._listeners = {}
+      this.status = 0
+      this.readyState = 0
+      this.sentHeaders = {}
+      this.sends = 0
+      this.lastBody = null
+    }
+    open(m, u) { this.method = m; this.url = u; this.readyState = 1 }
+    setRequestHeader(n, v) { this.sentHeaders[n] = v }
+    addEventListener(t, fn) { (this._listeners[t] = this._listeners[t] || []).push(fn) }
+    removeEventListener() {}
+    getResponseHeader(n) {
+      const h = this._respHeaders || {}
+      return h[String(n).toLowerCase()] ?? null
+    }
+    get upload() {
+      if (!this._upload) {
+        this._upload = { addEventListener() {}, removeEventListener() {} }
+      }
+      return this._upload
+    }
+    abort() { this.aborted = true }
+    send(body) {
+      this.lastBody = body
+      this.sends++
+      const s =
+        typeof FakeXHR.script === "function"
+          ? FakeXHR.script(this.sends, this)
+          : FakeXHR.script || {}
+      setTimeout(() => {
+        this.readyState = 4
+        if (s.networkError) {
+          this.status = 0
+          this._dispatch("error", { type: "error" })
+          this._dispatch("loadend", { type: "loadend" })
+          return
+        }
+        this.status = s.status
+        this._respHeaders = Object.fromEntries(
+          Object.entries(s.headers || {}).map(([k, v]) => [k.toLowerCase(), v]),
+        )
+        // 任何 HTTP 状态都算 load（error 只用于网络层失败），与原生一致
+        this._dispatch("load", { type: "load" })
+        this._dispatch("loadend", { type: "loadend" })
+      }, s.delay || 0)
+    }
+    _dispatch(t, ev) { for (const fn of this._listeners[t] || []) fn(ev) }
+  }
+
+  function xhrRequest(win, body) {
+    return new Promise((resolve) => {
+      const xhr = new win.XMLHttpRequest()
+      let onerrorCount = 0
+      let loadendCount = 0
+      xhr.open("POST", "http://x/api/fs/list")
+      xhr.setRequestHeader("content-type", "application/json")
+      xhr.onerror = function () { onerrorCount++ }
+      xhr.onloadend = function () {
+        loadendCount++
+        resolve({ status: xhr.status, sends: xhr.sends, body: xhr.lastBody, onerrorCount, loadendCount })
+      }
+      xhr.send(body)
+    })
+  }
+  const waitMs = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  const xhrWin = { XMLHttpRequest: FakeXHR }
+  new Function("window", patchCode)(xhrWin)
+  check("XHR 包裹层已安装", typeof xhrWin.XMLHttpRequest === "function" && xhrWin.XMLHttpRequest !== FakeXHR)
+
+  FakeXHR.script = (n) =>
+    n === 1
+      ? { status: 400, headers: { "X-Request-Body-Lost": "1" } }
+      : { status: 200 }
+  let out = await xhrRequest(xhrWin, '{"path":"/a"}')
+  check(
+    "标记 400 → 自动重试后成功（2 次发送，最终 200）",
+    out.sends === 2 && out.status === 200 && out.loadendCount === 1 && out.onerrorCount === 0,
+  )
+
+  FakeXHR.script = { status: 400 }
+  out = await xhrRequest(xhrWin, '{"path":"/a"}')
+  check(
+    "无标记 400 → 原样透传（1 次发送）",
+    out.sends === 1 && out.status === 400 && out.loadendCount === 1,
+  )
+
+  FakeXHR.script = () => ({ status: 400, headers: { "X-Request-Body-Lost": "1" } })
+  out = await xhrRequest(xhrWin, '{"path":"/a"}')
+  await waitMs(750) // 超过最大退避 600ms，确认不再继续重试
+  check(
+    "持续标记 400 → 重试 3 次后交付失败（共 4 次发送）",
+    out.sends === 4 && out.status === 400 && out.loadendCount === 1,
+  )
+
+  FakeXHR.script = { networkError: true }
+  out = await xhrRequest(xhrWin, '{"path":"/a"}')
+  check(
+    "网络错误 → onerror/onloadend 正常交付、不重试",
+    out.sends === 1 && out.status === 0 && out.onerrorCount === 1 && out.loadendCount === 1,
+  )
+
+  const probe = new xhrWin.XMLHttpRequest()
+  check("'onloadend' in xhr（axios 走 onloadend 分支）", "onloadend" in probe)
+  probe.withCredentials = true
+  check("withCredentials 等普通属性透传", probe.withCredentials === true)
+  check("upload 对象可用", !!(probe.upload && typeof probe.upload.addEventListener === "function"))
+
+  // fetch 包裹层（基础 fetch 必须在求值前就位：包裹层在 patch 时捕获引用）
+  const marker400 = () =>
+    new Response("{}", { status: 400, headers: { "X-Request-Body-Lost": "1" } })
+  const plain400 = () => new Response("{}", { status: 400 })
+  const ok200 = () => new Response("{}", { status: 200 })
+  let behavior = plain400
+  let calls = 0
+  const fetchWin = {
+    fetch: async () => {
+      calls++
+      return behavior()
+    },
+  }
+  new Function("window", patchCode)(fetchWin)
+
+  calls = 0
+  behavior = () => (calls === 1 ? marker400() : ok200())
+  let res = await fetchWin.fetch("http://x/api/fs/list", { method: "POST", body: "{}" })
+  check("fetch：标记 400 → 重试成功（2 次调用，最终 200）", res.status === 200 && calls === 2)
+
+  calls = 0
+  behavior = plain400
+  res = await fetchWin.fetch("http://x/api/fs/list", { method: "POST", body: "{}" })
+  check("fetch：无标记 400 → 不重试", res.status === 400 && calls === 1)
+
+  calls = 0
+  behavior = marker400
+  res = await fetchWin.fetch("http://x/api/fs/list", { method: "GET" })
+  check("fetch：GET → 不重试", res.status === 400 && calls === 1)
+
+  calls = 0
+  behavior = marker400
+  res = await fetchWin.fetch("http://x/api/fs/list", {
+    method: "POST",
+    body: new ReadableStream({
+      start(c) { c.enqueue(new TextEncoder().encode("x")); c.close() },
+    }),
+  })
+  check("fetch：流式 body → 不重试（无法重发）", res.status === 400 && calls === 1)
+
 } catch (err) {
   check("测试执行", false, err.message)
   console.error(err)

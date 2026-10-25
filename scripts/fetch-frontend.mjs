@@ -40,6 +40,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { RETRY_PATCH_SCRIPT } from "./retry-patch.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // 始终以仓库根目录为基准（无论从哪个 cwd 调用）
@@ -133,7 +134,51 @@ function replaceDist(src) {
   copyManifestToRoot()
   stampFrontendVersion(src)
   patchManifestCredentials()
+  patchNetworkRetry()
   console.log(`✓ Frontend dist ready (${DEST})`)
+}
+
+/**
+ * 构建期向 dist/index.html 注入「请求体丢失自动重试」补丁（issue #112 的
+ * 用户侧兜底）。
+ *
+ * 背景：EdgeOne Node 云函数会间歇性丢失/截断 POST 请求体（实测 ~7%~40%，
+ * Cloudflare 为 0）。服务端已在任何业务 handler 之前以
+ * 400 + X-Request-Body-Lost: 1 拒绝这类请求（见 jsonBodyGuard）—— 因为
+ * 请求体没读到时业务必然未执行，该 400 对客户端而言重试绝对安全；平台
+ * 丢 body 又是间歇性故障，重试即可恢复。前端是官方预构建产物（axios，
+ * 浏览器通道为 XMLHttpRequest），无法直接改源码，故在构建期往 index.html
+ * 的 <head> 注入一段内联脚本，包裹 window.XMLHttpRequest 与 window.fetch：
+ * 命中标记即自动透明重发（最多 3 次，100/300/600ms 退避），用户无感知。
+ *
+ * 安全性：
+ * - 只对带 X-Request-Body-Lost: 1 标记的 400 重试，其它任何响应（包括
+ *   业务级 400/500）原样透传，语义与原生完全一致；
+ * - 标记由服务端 guard 在业务执行前发出，重试不可能重复执行写操作；
+ * - 非 EdgeOne 部署永远不会出现该标记，包裹层零行为差异。
+ */
+function patchNetworkRetry() {
+  const idx = path.join(DEST, "index.html")
+  try {
+    if (!fs.existsSync(idx)) return
+    let html = fs.readFileSync(idx, "utf-8")
+    if (html.includes("__openlistBodyRetry")) return
+    if (!/<head[^>]*>/i.test(html)) return
+    const changed = html.replace(
+      /<head([^>]*)>/i,
+      (full, attrs) => `${full}\n${RETRY_PATCH_SCRIPT}`,
+    )
+    if (changed === html) return
+    html = changed
+    fs.writeFileSync(idx, html)
+    console.log(
+      "  Injected X-Request-Body-Lost transparent retry patch into dist/index.html (issue #112)",
+    )
+  } catch (err) {
+    console.warn(
+      `  [fetch-frontend] patch network retry skipped: ${err?.message || err}`,
+    )
+  }
 }
 
 /**
